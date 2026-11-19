@@ -24,7 +24,7 @@ public final class CyclerConfig {
         }
 
         public String label() {
-            return EnchantInfo.pretty(enchant) + " lvl>=" + minLevel + " price<=" + maxPrice;
+            return EnchantInfo.pretty(enchant) + " " + EnchantInfo.roman(minLevel) + " <=" + maxPrice;
         }
     }
 
@@ -51,6 +51,17 @@ public final class CyclerConfig {
     public int maxAttempts = 300;
     public boolean playSound = true;
     public boolean stopOnDamage = true;
+    public boolean debug = true;
+    public int cfgVersion = 0;
+
+    public static List<Target> defaultTargets() {
+        List<Target> list = new ArrayList<>();
+        list.add(new Target("protection", 4, 20));
+        list.add(new Target("blast_protection", 4, 20));
+        list.add(new Target("unbreaking", 3, 20));
+        list.add(new Target("mending", 1, 20));
+        return list;
+    }
 
     private static final Gson GSON = new GsonBuilder().setPrettyPrinting().create();
     private static CyclerConfig instance;
@@ -81,8 +92,10 @@ public final class CyclerConfig {
         }
         if (instance.targets == null) instance.targets = new ArrayList<>();
         if (instance.speed == null) instance.speed = Speed.SAFE;
-        if (fresh) {
-            instance.targets.add(new Target("mending", 1, 30));
+        // Version 2: new default list (max price under 21 emeralds). Older configs get the new defaults once.
+        if (fresh || instance.cfgVersion < 2) {
+            instance.targets = defaultTargets();
+            instance.cfgVersion = 2;
             save();
         }
     }

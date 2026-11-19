@@ -1,8 +1,10 @@
 package dev.villagercycler;
 
+import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 
 /** Vanilla enchantments that can appear in librarian books, with their max levels. */
 public final class EnchantInfo {
@@ -50,7 +52,48 @@ public final class EnchantInfo {
         IDS = List.copyOf(MAX.keySet());
     }
 
+    /** Treasure-type books that librarians sell at double price. */
+    private static final Set<String> DOUBLE_PRICE =
+            Set.of("mending", "frost_walker", "curse_of_binding", "curse_of_vanishing");
+
     private EnchantInfo() {}
+
+    /**
+     * Vanilla librarian book price: 2 + random(0 .. 4 + 10*level) + 3*level, doubled for treasure books, capped at 64.
+     */
+    public static int minPrice(String id, int level) {
+        int p = 2 + 3 * level;
+        if (DOUBLE_PRICE.contains(id)) p *= 2;
+        return Math.min(p, 64);
+    }
+
+    public static int maxPrice(String id, int level) {
+        int p = 2 + (4 + 10 * level) + 3 * level;
+        if (DOUBLE_PRICE.contains(id)) p *= 2;
+        return Math.min(p, 64);
+    }
+
+    public static String roman(int n) {
+        return switch (n) {
+            case 1 -> "I";
+            case 2 -> "II";
+            case 3 -> "III";
+            case 4 -> "IV";
+            case 5 -> "V";
+            default -> String.valueOf(n);
+        };
+    }
+
+    public static List<String> search(String query) {
+        String q = query == null ? "" : query.trim().toLowerCase();
+        if (q.isEmpty()) return IDS;
+        String underscored = q.replace(' ', '_');
+        List<String> out = new ArrayList<>();
+        for (String id : IDS) {
+            if (id.contains(underscored) || pretty(id).toLowerCase().contains(q)) out.add(id);
+        }
+        return out;
+    }
 
     public static int maxLevel(String id) {
         return MAX.getOrDefault(id, 5);

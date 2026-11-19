@@ -21,36 +21,44 @@ import net.minecraft.util.hit.BlockHitResult;
 import net.minecraft.util.hit.EntityHitResult;
 import net.minecraft.util.hit.HitResult;
 import net.minecraft.util.math.BlockPos;
+import net.minecraft.util.math.Box;
 import net.minecraft.util.math.Direction;
 import net.minecraft.util.math.MathHelper;
 import net.minecraft.util.math.Vec3d;
 import net.minecraft.village.TradeOffer;
 import net.minecraft.village.TradeOfferList;
+import net.minecraft.world.RaycastContext;
 
+import java.util.ArrayList;
+import java.util.List;
 import java.util.Random;
 
 /**
  * State machine that re-rolls a librarian's trades.
  *
- * Cycle: open trades -> evaluate -> (no match) close -> break lectern with axe -> pick it up ->
- * (restore to offhand) -> wait until villager loses its job -> place lectern at the same spot ->
+ * Cycle: open trades -> evaluate -> (no match) close -> break lectern with axe -> confirm -> pick it up ->
+ * (restore to offhand) -> wait until villager loses its job -> place lectern at the same spot -> confirm ->
  * wait until villager takes the job -> open trades again.
  *
- * Everything goes through the normal client interaction manager (same packets as a real player),
- * with smooth camera rotation, vanilla reach limits and randomized delays.
+ * Everything goes through the normal client interaction manager (same packets as a real player), with smooth
+ * camera rotation toward points that are actually visible, vanilla reach limits and randomized delays.
+ * With "Debug chat" on, every state change and every "stuck" reason is printed to your chat.
  */
 public final class CycleController {
     private enum State {
-        IDLE, OPEN_TRADES, WAIT_OFFERS, CLOSE_SCREEN, BREAK, CONFIRM_BREAK, WAIT_PICKUP, RESTORE, WAIT_LOSE, PLACE, CONFIRM_PLACE, WAIT_JOB
+        IDLE, OPEN_TRADES, WAIT_OFFERS, CLOSE_SCREEN, BREAK, CONFIRM_BREAK, WAIT_PICKUP, RESTORE,
+        WAIT_LOSE, PLACE, CONFIRM_PLACE, WAIT_JOB
     }
 
+    private record PlaceTarget(Vec3d point, BlockPos support, Direction face) {}
+
     private static final Random RNG = new Random();
+    private static final double ENTITY_REACH = 2.85;
+    private static final double BLOCK_REACH = 4.4;
 
     private State state = State.IDLE;
     private int villagerId = -1;
     private BlockPos lecternPos;
-    private BlockPos supportPos;
-    private Direction face;
 
     private int wait;
     private int stateTicks;
@@ -59,11 +67,13 @@ public final class CycleController {
     private int openRetries;
     private int restoreTries;
     private int lecternsBefore;
-    private boolean readingDone;
-    private boolean breakingStarted;
+    private int confirmFails;
     private int onTargetTicks;
     private int needSteady;
-    private int confirmFails;
+    private int pointIdx;
+    private int otherScreenTicks;
+    private boolean readingDone;
+    private boolean breakingStarted;
     private double jx, jy, jz;
     private String lastSeen = "-";
 
@@ -94,13 +104,11 @@ public final class CycleController {
         } else if (hit instanceof BlockHitResult bhr && hit.getType() == HitResult.Type.BLOCK) {
             BlockPos clicked = bhr.getBlockPos();
             if (w.getBlockState(clicked).isOf(Blocks.LECTERN)) {
-                setSpotFromLectern(w, clicked);
+                lecternPos = clicked;
                 say(client, "Lectern spot selected.");
             } else {
                 lecternPos = clicked.offset(bhr.getSide());
-                supportPos = clicked;
-                face = bhr.getSide();
-                say(client, "Lectern spot selected (will be placed against the block you aimed at).");
+                say(client, "Lectern spot selected (the lectern will be placed next to the block you aimed at).");
             }
         }
         start(client);
@@ -124,23 +132,7 @@ public final class CycleController {
                 }
             }
         }
-        if (best != null) setSpotFromLectern(w, best);
-    }
-
-    private void setSpotFromLectern(ClientWorld w, BlockPos pos) {
-        lecternPos = pos;
-        Direction[] order = {Direction.DOWN, Direction.NORTH, Direction.SOUTH, Direction.EAST, Direction.WEST, Direction.UP};
-        for (Direction d : order) {
-            BlockPos s = pos.offset(d);
-            Direction clickFace = d.getOpposite();
-            if (w.getBlockState(s).isSideSolidFullSquare(w, s, clickFace)) {
-                supportPos = s;
-                face = clickFace;
-                return;
-            }
-        }
-        supportPos = null;
-        face = null;
+        if (best != null) lecternPos = best;
     }
 
     private void start(MinecraftClient client) {
@@ -154,10 +146,6 @@ public final class CycleController {
         }
         if (lecternPos == null) {
             say(client, "No lectern spot yet. Aim at the lectern (or the block it goes against) and press the key.");
-            return;
-        }
-        if (supportPos == null || face == null) {
-            say(client, "The lectern has no solid block to be placed against. Select the support block instead.");
             return;
         }
         if (cfg.targets.isEmpty()) {
@@ -191,7 +179,7 @@ public final class CycleController {
             return;
         }
 
-        say(client, "Started. Reminder: make sure automation like this is allowed on your server. ESC = emergency stop.");
+        say(client, "Started. Make sure automation like this is allowed on your server. ESC = emergency stop.");
         attempts = 0;
         openRetries = 0;
         restoreTries = 0;
@@ -201,6 +189,7 @@ public final class CycleController {
 
         String prof = profession(v);
         boolean lecternHere = w.getBlockState(lecternPos).isOf(Blocks.LECTERN);
+        dbg(client, "villager job: " + prof + ", lectern placed: " + lecternHere);
         if (prof.equals("nitwit")) {
             say(client, "This villager is a nitwit - it can never get a job.");
             state = State.IDLE;
@@ -245,12 +234,18 @@ public final class CycleController {
 
         Screen screen = client.currentScreen;
         if (screen instanceof MerchantScreen) {
+            otherScreenTicks = 0;
             if (state != State.WAIT_OFFERS && state != State.CLOSE_SCREEN) {
                 p.closeHandledScreen();
                 return;
             }
         } else if (screen != null) {
+            if (otherScreenTicks++ % 100 == 0) {
+                dbg(client, "paused: another screen is open (" + screen.getClass().getSimpleName() + ")");
+            }
             return; // some other screen is open: pause
+        } else {
+            otherScreenTicks = 0;
         }
 
         if (wait > 0) {
@@ -264,14 +259,14 @@ public final class CycleController {
         }
 
         switch (state) {
-            case OPEN_TRADES -> doOpenTrades(client, p, w, v, cfg);
-            case WAIT_OFFERS -> doWaitOffers(client, p, w, cfg);
+            case OPEN_TRADES -> doOpenTrades(client, p, w, v);
+            case WAIT_OFFERS -> doWaitOffers(client, p, cfg);
             case CLOSE_SCREEN -> doCloseScreen(client, p, w, cfg);
             case BREAK -> doBreak(client, p, w);
             case CONFIRM_BREAK -> doConfirmBreak(client, w, cfg);
             case WAIT_PICKUP -> doWaitPickup(client, p);
             case RESTORE -> doRestore(client, p);
-            case WAIT_LOSE -> doWaitLose(client, w, v, cfg);
+            case WAIT_LOSE -> doWaitLose(client, v, cfg);
             case PLACE -> doPlace(client, p, w, cfg);
             case CONFIRM_PLACE -> doConfirmPlace(client, w, cfg);
             case WAIT_JOB -> doWaitJob(client, w, v, cfg);
@@ -282,7 +277,7 @@ public final class CycleController {
 
     // ------------------------------------------------------------------ states
 
-    private void doOpenTrades(MinecraftClient c, ClientPlayerEntity p, ClientWorld w, VillagerEntity v, CyclerConfig cfg) {
+    private void doOpenTrades(MinecraftClient c, ClientPlayerEntity p, ClientWorld w, VillagerEntity v) {
         String prof = profession(v);
         if (prof.equals("nitwit")) {
             stop(c, "This villager is a nitwit - it can never get a job.");
@@ -297,7 +292,14 @@ public final class CycleController {
             resetCycle(c, w);
             return;
         }
-        Vec3d target = v.getBoundingBox().getCenter().add(jx * 0.3, jy * 0.4, jz * 0.3);
+
+        Vec3d target = villagerAim(p, w, v);
+        if (target == null) {
+            if (stateTicks > 30) {
+                stop(c, "The villager is more than 3 blocks away (entity reach). Stand closer and press K again.");
+            }
+            return;
+        }
         if (!rotateToward(p, target)) {
             onTargetTicks = 0;
             return;
@@ -309,24 +311,29 @@ public final class CycleController {
             // ONE interaction only. After this we just wait for the screen; we never re-send while waiting.
             ActionResult r = c.interactionManager.interactEntityAtLocation(p, v, ehr, Hand.MAIN_HAND);
             if (!r.isAccepted()) c.interactionManager.interactEntity(p, v, Hand.MAIN_HAND);
+            dbg(c, "clicked the villager once");
             enter(State.WAIT_OFFERS);
             return;
         }
+        // Aimed at a point of the villager, but the crosshair is on something else.
         onTargetTicks = 0;
-        if (stateTicks > 80) {
-            stop(c, "Cannot aim at the villager (entity reach is 3 blocks, or something blocks the view).");
-        } else if (stateTicks % 12 == 0) {
-            rerollJitter();
+        if (stateTicks % 8 == 0) pointIdx++; // try another part of the villager
+        if (stateTicks == 40) {
+            say(c, "Aimed at the villager but the crosshair is on " + describe(c) + " - something is in the way.");
+        }
+        if (stateTicks > 160) {
+            stop(c, "Cannot click the villager: the crosshair stays on " + describe(c) + ". Clear the view or move.");
         }
     }
 
-    private void doWaitOffers(MinecraftClient c, ClientPlayerEntity p, ClientWorld w, CyclerConfig cfg) {
+    private void doWaitOffers(MinecraftClient c, ClientPlayerEntity p, CyclerConfig cfg) {
         if (!(c.currentScreen instanceof MerchantScreen ms)) {
             // Patient, latency-aware timeout. Nothing is sent while waiting.
             if (stateTicks > 60 + 4 * pingTicks(c)) {
                 if (++openRetries > 3) {
                     stop(c, "The trade screen never opened (server lag or the villager is busy).");
                 } else {
+                    dbg(c, "trade screen did not open, retrying (" + openRetries + "/3)");
                     enter(State.OPEN_TRADES);
                     wait = 30 + RNG.nextInt(30) + pingTicks(c);
                 }
@@ -352,10 +359,11 @@ public final class CycleController {
         }
         attempts++;
         lastSeen = TradeScanner.describe(offers);
+        say(c, "Try " + attempts + ": " + lastSeen);
         TradeScanner.Match m = TradeScanner.find(offers, cfg.targets);
         if (m != null) {
             state = State.IDLE;
-            say(c, "FOUND " + EnchantInfo.pretty(m.id()) + " " + m.level() + " for " + m.price()
+            say(c, "FOUND " + EnchantInfo.pretty(m.id()) + " " + EnchantInfo.roman(m.level()) + " for " + m.price()
                     + " emeralds after " + attempts + " tries. Trade screen left open.");
             if (cfg.playSound) p.playSound(SoundEvents.ENTITY_PLAYER_LEVELUP, 1.0f, 1.0f);
             return;
@@ -392,6 +400,7 @@ public final class CycleController {
         BlockHitResult bhr = blockHit(c);
         if (bhr != null && bhr.getBlockPos().equals(lecternPos)) {
             if (!breakingStarted && ++onTargetTicks < needSteady) return; // settle on target before the first hit
+            if (!breakingStarted) dbg(c, "breaking the lectern");
             breakingStarted = true;
             if (c.interactionManager.updateBlockBreakingProgress(lecternPos, bhr.getSide())) {
                 p.swingHand(Hand.MAIN_HAND);
@@ -403,12 +412,13 @@ public final class CycleController {
             breakingStarted = false;
         }
         onTargetTicks = 0;
-        Vec3d target = Vec3d.ofCenter(lecternPos).add(jx * 0.1, jy * 0.2, jz * 0.1);
-        rotateToward(p, target);
-        if (stateTicks > 240) {
-            stop(c, "Cannot break the lectern (out of reach, or the villager blocks the view).");
-        } else if (stateTicks % 12 == 0) {
-            rerollJitter();
+        rotateToward(p, lecternAim(p, w));
+        if (stateTicks % 8 == 0) pointIdx++;
+        if (stateTicks == 40) {
+            say(c, "Cannot hit the lectern: the crosshair is on " + describe(c) + ".");
+        }
+        if (stateTicks > 200) {
+            stop(c, "Cannot break the lectern (out of reach 4.5, or something blocks the view).");
         }
     }
 
@@ -418,6 +428,7 @@ public final class CycleController {
             if (++confirmFails > 5) {
                 stop(c, "The server keeps rejecting the lectern break (lag, protection, or no permission here).");
             } else {
+                dbg(c, "server put the lectern back, retrying (" + confirmFails + "/5)");
                 enter(State.BREAK);
                 wait = delay(c, cfg);
             }
@@ -457,7 +468,7 @@ public final class CycleController {
         wait = 4;
     }
 
-    private void doWaitLose(MinecraftClient c, ClientWorld w, VillagerEntity v, CyclerConfig cfg) {
+    private void doWaitLose(MinecraftClient c, VillagerEntity v, CyclerConfig cfg) {
         if (profession(v).equals("none")) {
             enter(State.PLACE);
             wait = delay(c, cfg);
@@ -477,26 +488,39 @@ public final class CycleController {
             enter(State.RESTORE);
             return;
         }
-        Vec3d target = facePoint();
-        if (!rotateToward(p, target)) {
+        PlaceTarget pt = findPlaceTarget(p, w);
+        if (pt == null) {
+            if (stateTicks > 60) {
+                stop(c, "No clear view of a block to place the lectern against (blocked, or out of reach 4.5).");
+            } else if (stateTicks % 10 == 0) {
+                rerollJitter();
+            }
+            return;
+        }
+        if (!rotateToward(p, pt.point())) {
             onTargetTicks = 0;
             return;
         }
         BlockHitResult bhr = blockHit(c);
-        if (bhr != null && bhr.getBlockPos().equals(supportPos) && bhr.getSide() == face) {
+        // Any face that points into the lectern spot works - same as a real player.
+        if (bhr != null && bhr.getBlockPos().offset(bhr.getSide()).equals(lecternPos)) {
             if (++onTargetTicks < needSteady) return;
             ActionResult r = c.interactionManager.interactBlock(p, Hand.OFF_HAND, bhr);
             if (r.isAccepted()) {
                 p.swingHand(Hand.OFF_HAND);
+                dbg(c, "placed the lectern");
                 enter(State.CONFIRM_PLACE);
                 wait = 6 + 2 * pingTicks(c) + RNG.nextInt(4);
                 return;
             }
         } else {
             onTargetTicks = 0;
+            if (stateTicks == 40) {
+                say(c, "Cannot place the lectern: the crosshair is on " + describe(c) + ".");
+            }
         }
-        if (stateTicks > 80) {
-            stop(c, "Cannot place the lectern (aim blocked, or the spot is occupied).");
+        if (stateTicks > 120) {
+            stop(c, "Cannot place the lectern (aim blocked, or the spot is occupied by you or an entity).");
         } else if (stateTicks % 12 == 0) {
             rerollJitter();
         }
@@ -508,6 +532,7 @@ public final class CycleController {
             if (++confirmFails > 5) {
                 stop(c, "The server keeps rejecting the lectern placement (lag, protection, or no permission here).");
             } else {
+                dbg(c, "server removed the lectern, retrying (" + confirmFails + "/5)");
                 enter(State.PLACE);
                 wait = delay(c, cfg);
             }
@@ -533,7 +558,103 @@ public final class CycleController {
         }
     }
 
-    // ------------------------------------------------------------------ helpers
+    // ------------------------------------------------------------------ aiming helpers
+
+    /** A point on the villager that is within entity reach and not hidden behind blocks. */
+    private Vec3d villagerAim(ClientPlayerEntity p, ClientWorld w, VillagerEntity v) {
+        Box b = v.getBoundingBox();
+        double h = b.getLengthY();
+        double cx = (b.minX + b.maxX) / 2.0;
+        double cz = (b.minZ + b.maxZ) / 2.0;
+        double[] fy = {0.62, 0.85, 0.42, 0.72, 0.25};
+        double[][] off = {{0, 0}, {0.15, 0}, {-0.15, 0}, {0, 0.15}, {0, -0.15}};
+        Vec3d eye = p.getEyePos();
+        List<Vec3d> visible = new ArrayList<>();
+        List<Vec3d> inReach = new ArrayList<>();
+        for (double f : fy) {
+            for (double[] o : off) {
+                Vec3d pt = new Vec3d(cx + o[0], b.minY + h * f, cz + o[1]);
+                if (eye.distanceTo(pt) > ENTITY_REACH) continue;
+                inReach.add(pt);
+                BlockHitResult r = w.raycast(new RaycastContext(eye, pt, RaycastContext.ShapeType.OUTLINE,
+                        RaycastContext.FluidHandling.NONE, p));
+                if (r.getType() == HitResult.Type.MISS) visible.add(pt);
+            }
+        }
+        List<Vec3d> use = visible.isEmpty() ? inReach : visible;
+        if (use.isEmpty()) return null;
+        return use.get(Math.floorMod(pointIdx, use.size()));
+    }
+
+    /** A point on the lectern block that can actually be hit. */
+    private Vec3d lecternAim(ClientPlayerEntity p, ClientWorld w) {
+        double[] fy = {0.5, 0.1, 0.85};
+        double[][] off = {{0, 0}, {0.12, 0}, {-0.12, 0}, {0, 0.12}, {0, -0.12}};
+        Vec3d eye = p.getEyePos();
+        List<Vec3d> visible = new ArrayList<>();
+        for (double f : fy) {
+            for (double[] o : off) {
+                Vec3d pt = new Vec3d(lecternPos.getX() + 0.5 + o[0], lecternPos.getY() + f, lecternPos.getZ() + 0.5 + o[1]);
+                if (eye.distanceTo(pt) > BLOCK_REACH) continue;
+                BlockHitResult r = w.raycast(new RaycastContext(eye, pt, RaycastContext.ShapeType.OUTLINE,
+                        RaycastContext.FluidHandling.NONE, p));
+                if (r.getType() == HitResult.Type.BLOCK && r.getBlockPos().equals(lecternPos)) visible.add(pt);
+            }
+        }
+        if (visible.isEmpty()) return Vec3d.ofCenter(lecternPos);
+        return visible.get(Math.floorMod(pointIdx, visible.size()));
+    }
+
+    /** Finds a neighbouring block face (pointing into the lectern spot) that we can see and reach. */
+    private PlaceTarget findPlaceTarget(ClientPlayerEntity p, ClientWorld w) {
+        Direction[] order = {Direction.DOWN, Direction.NORTH, Direction.SOUTH, Direction.EAST, Direction.WEST, Direction.UP};
+        Vec3d eye = p.getEyePos();
+        for (Direction d : order) {
+            BlockPos s = lecternPos.offset(d);
+            Direction f = d.getOpposite();
+            if (!w.getBlockState(s).isSideSolidFullSquare(w, s, f)) continue;
+            double ax = f.getAxis() == Direction.Axis.X ? 0 : jx * 0.3;
+            double ay = f.getAxis() == Direction.Axis.Y ? 0 : jy * 0.3;
+            double az = f.getAxis() == Direction.Axis.Z ? 0 : jz * 0.3;
+            Vec3d pt = Vec3d.ofCenter(s)
+                    .add(f.getOffsetX() * 0.49, f.getOffsetY() * 0.49, f.getOffsetZ() * 0.49)
+                    .add(ax, ay, az);
+            if (eye.distanceTo(pt) > BLOCK_REACH) continue;
+            BlockHitResult r = w.raycast(new RaycastContext(eye, pt, RaycastContext.ShapeType.OUTLINE,
+                    RaycastContext.FluidHandling.NONE, p));
+            if (r.getType() == HitResult.Type.BLOCK && r.getBlockPos().equals(s)) {
+                return new PlaceTarget(pt, s, f);
+            }
+        }
+        return null;
+    }
+
+    /**
+     * Smoothly turns the camera toward a point (never snaps). The rotation is applied this tick and sent to the
+     * server by the normal movement packet next tick, so actions only happen on a later tick, like a real player.
+     * Returns true when already looking at the point.
+     */
+    private boolean rotateToward(ClientPlayerEntity p, Vec3d point) {
+        Vec3d eye = p.getEyePos();
+        double dx = point.x - eye.x;
+        double dy = point.y - eye.y;
+        double dz = point.z - eye.z;
+        double horiz = Math.sqrt(dx * dx + dz * dz);
+        float targetYaw = (float) (MathHelper.atan2(dz, dx) * 57.29577951308232) - 90.0f;
+        float targetPitch = (float) -(MathHelper.atan2(dy, horiz) * 57.29577951308232);
+        float dyaw = MathHelper.wrapDegrees(targetYaw - p.getYaw());
+        float dpitch = targetPitch - p.getPitch();
+        if (Math.abs(dyaw) < 1.2f && Math.abs(dpitch) < 1.2f) return true;
+
+        float k = 0.25f + RNG.nextFloat() * 0.20f;
+        float stepYaw = MathHelper.clamp(dyaw * k, -14f, 14f);
+        float stepPitch = MathHelper.clamp(dpitch * k, -10f, 10f);
+        p.setYaw(p.getYaw() + stepYaw);
+        p.setPitch(MathHelper.clamp(p.getPitch() + stepPitch, -90f, 90f));
+        return false;
+    }
+
+    // ------------------------------------------------------------------ misc helpers
 
     private void enter(State s) {
         state = s;
@@ -542,7 +663,9 @@ public final class CycleController {
         breakingStarted = false;
         onTargetTicks = 0;
         needSteady = 2 + RNG.nextInt(3);
+        pointIdx = RNG.nextInt(50);
         rerollJitter();
+        dbg(MinecraftClient.getInstance(), "state -> " + s);
         if (s == State.BREAK) {
             ClientPlayerEntity p = MinecraftClient.getInstance().player;
             lecternsBefore = p == null ? 0 : countLecterns(p);
@@ -591,38 +714,20 @@ public final class CycleController {
         return (h instanceof BlockHitResult b && h.getType() == HitResult.Type.BLOCK) ? b : null;
     }
 
-    private Vec3d facePoint() {
-        Vec3d center = Vec3d.ofCenter(supportPos);
-        Vec3d off = new Vec3d(face.getOffsetX() * 0.49, face.getOffsetY() * 0.49, face.getOffsetZ() * 0.49);
-        double ax = face.getAxis() == Direction.Axis.X ? 0 : jx * 0.4;
-        double ay = face.getAxis() == Direction.Axis.Y ? 0 : jy * 0.4;
-        double az = face.getAxis() == Direction.Axis.Z ? 0 : jz * 0.4;
-        return center.add(off).add(ax, ay, az);
+    /** Human-readable description of what the crosshair is on (for the debug messages). */
+    private static String describe(MinecraftClient c) {
+        HitResult h = c.crosshairTarget;
+        if (h instanceof EntityHitResult e) {
+            return "an entity (" + e.getEntity().getType().getName().getString() + ")";
+        }
+        if (h instanceof BlockHitResult b && h.getType() == HitResult.Type.BLOCK && c.world != null) {
+            return "a block (" + c.world.getBlockState(b.getBlockPos()).getBlock().getName().getString() + ")";
+        }
+        return "nothing";
     }
 
-    /**
-     * Smoothly turns the camera toward a point. The rotation is applied this tick and sent to the server by the
-     * normal movement packet next tick, so actions only happen on a later tick (like a real player's).
-     * Returns true when already looking at the point.
-     */
-    private boolean rotateToward(ClientPlayerEntity p, Vec3d point) {
-        Vec3d eye = p.getEyePos();
-        double dx = point.x - eye.x;
-        double dy = point.y - eye.y;
-        double dz = point.z - eye.z;
-        double horiz = Math.sqrt(dx * dx + dz * dz);
-        float targetYaw = (float) (MathHelper.atan2(dz, dx) * 57.29577951308232) - 90.0f;
-        float targetPitch = (float) -(MathHelper.atan2(dy, horiz) * 57.29577951308232);
-        float dyaw = MathHelper.wrapDegrees(targetYaw - p.getYaw());
-        float dpitch = targetPitch - p.getPitch();
-        if (Math.abs(dyaw) < 1.5f && Math.abs(dpitch) < 1.5f) return true;
-
-        float k = 0.40f + RNG.nextFloat() * 0.25f;
-        float stepYaw = MathHelper.clamp(dyaw * k, -25f, 25f);
-        float stepPitch = MathHelper.clamp(dpitch * k, -18f, 18f);
-        p.setYaw(p.getYaw() + stepYaw);
-        p.setPitch(MathHelper.clamp(p.getPitch() + stepPitch, -90f, 90f));
-        return false;
+    private static void dbg(MinecraftClient c, String msg) {
+        if (CyclerConfig.get().debug) say(c, "[debug] " + msg);
     }
 
     private static void say(MinecraftClient c, String msg) {

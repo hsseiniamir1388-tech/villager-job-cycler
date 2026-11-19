@@ -17,6 +17,12 @@ Needs Fabric Loader 0.16.10+ and Fabric API 0.119.4+1.21.4.
    aim at the block the lectern should go against and press `K` again.
 5. `K` again or `ESC` stops. When a match is found the trade screen stays open.
 
+## v1.2 changes
+* New menu: search box for every enchantment, default list (Protection IV, Blast Protection IV, Unbreaking III, Mending I, all <= 20 emeralds), X removes, Shift = +/-5 price, real Minecraft price formula shown.
+* Click fix: aims at a visible point of the villager (reach 3 blocks), tries other points if blocked, places the lectern against any visible neighbouring face.
+* "Debug chat" (Settings tab) prints every step and, when stuck, what the crosshair is actually on.
+* Slower, smoother camera.
+
 ## v1.1 changes
 * Exactly ONE villager interaction per attempt; while waiting for the trade screen nothing is re-sent (patient, ping-based timeout).
 * Crosshair must stay on the target for a few ticks before every click / break / place (reaction time).
