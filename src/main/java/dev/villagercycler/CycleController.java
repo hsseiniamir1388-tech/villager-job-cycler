@@ -10,6 +10,7 @@ import net.minecraft.client.world.ClientWorld;
 import net.minecraft.entity.Entity;
 import net.minecraft.entity.passive.VillagerEntity;
 import net.minecraft.item.Items;
+import net.minecraft.registry.Registries;
 import net.minecraft.registry.tag.ItemTags;
 import net.minecraft.screen.slot.SlotActionType;
 import net.minecraft.sound.SoundEvents;
@@ -574,7 +575,7 @@ public final class CycleController {
     }
 
     private static String profession(VillagerEntity v) {
-        return v.getVillagerData().getProfession().getKey().map(k -> k.getValue().getPath()).orElse("none");
+        return Registries.VILLAGER_PROFESSION.getId(v.getVillagerData().getProfession()).getPath();
     }
 
     private static int countLecterns(ClientPlayerEntity p) {
