@@ -17,6 +17,13 @@ Needs Fabric Loader 0.16.10+ and Fabric API 0.119.4+1.21.4.
    aim at the block the lectern should go against and press `K` again.
 5. `K` again or `ESC` stops. When a match is found the trade screen stays open.
 
+## v1.1 changes
+* Exactly ONE villager interaction per attempt; while waiting for the trade screen nothing is re-sent (patient, ping-based timeout).
+* Crosshair must stay on the target for a few ticks before every click / break / place (reaction time).
+* After breaking or placing the lectern it waits for the server (ping-scaled) and checks the change really stuck; retries if the server reverted it.
+* All delays scale with your ping, with random jitter, occasional hesitation and a longer break every ~20 attempts.
+* Waits until the villager actually loses its job before re-placing the lectern.
+
 ## Safety notes
 * Uses normal interaction packets, smooth camera rotation, vanilla reach, randomized delays (Speed: SAFE/NORMAL/FAST).
 * Stops when you take damage, the villager is lost/too far, or trades are locked (already traded with).
